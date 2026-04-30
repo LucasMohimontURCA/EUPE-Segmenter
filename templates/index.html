@@ -1,0 +1,1046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>EUPE Visualizer</title>
+<style>
+:root{
+  --bg:#0d0f18;--panel:#13161f;--panel2:#1a1e2e;--panel3:#20263a;
+  --border:#262c42;--border2:#353d5e;
+  --accent:#6c63ff;--a2:#ff6584;--a3:#43c6ac;--a4:#f7c948;
+  --text:#dde1f5;--sub:#7b80a0;--sub2:#4a5070;
+  --ok:#3ecf8e;--err:#ff5f6d;--warn:#f7c948;
+  --r:8px;--r-sm:5px;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);
+     font-family:'Segoe UI',system-ui,sans-serif;
+     font-size:13px;height:100vh;display:flex;flex-direction:column;overflow:hidden;}
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:var(--panel);}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px;}
+
+/* ── Header ── */
+header{display:flex;align-items:center;gap:8px;padding:7px 14px;
+       background:var(--panel);border-bottom:1px solid var(--border);
+       flex-shrink:0;flex-wrap:wrap;row-gap:5px;}
+header h1{font-size:.88rem;font-weight:800;letter-spacing:.05em;color:var(--accent);}
+#filename{font-size:.72rem;color:var(--sub);flex:1;min-width:0;
+          overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#counter{font-size:.72rem;color:var(--sub);white-space:nowrap;}
+.nav-btn{background:var(--border);border:none;color:var(--text);
+         width:28px;height:28px;border-radius:var(--r-sm);
+         cursor:pointer;font-size:.9rem;display:flex;align-items:center;
+         justify-content:center;transition:background .15s;flex-shrink:0;}
+.nav-btn:hover{background:var(--accent);}
+.tab-bar{display:flex;gap:2px;background:var(--panel2);border-radius:6px;padding:2px;margin-left:auto;}
+.tab{border:none;background:none;color:var(--sub);padding:4px 12px;border-radius:var(--r-sm);
+     font-size:.72rem;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;}
+.tab.active{background:var(--accent);color:#fff;}
+#gmBadge{display:none;font-size:.68rem;background:rgba(108,99,255,.18);
+         border:1px solid rgba(108,99,255,.4);border-radius:4px;padding:2px 8px;
+         color:var(--accent);white-space:nowrap;}
+#gmBadge.has-data{display:inline-block;}
+
+/* ── Layout ── */
+main{display:flex;flex:1;overflow:hidden;}
+
+/* ── Sidebar ── */
+aside{width:252px;min-width:200px;background:var(--panel);border-right:1px solid var(--border);
+      display:flex;flex-direction:column;padding:10px;gap:8px;overflow-y:auto;flex-shrink:0;}
+aside h2{font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--sub);margin-top:2px;}
+.sep{border:none;border-top:1px solid var(--border);}
+
+/* ── Controls ── */
+.ctrl{display:flex;flex-direction:column;gap:4px;}
+.ctrl label{font-size:.7rem;color:var(--sub);}
+.ctrl input[type=range]{width:100%;accent-color:var(--accent);}
+.val{font-size:.7rem;color:var(--text);font-weight:700;}
+select,input[type=text]{background:var(--panel2);border:1px solid var(--border);
+  color:var(--text);border-radius:var(--r-sm);padding:4px 7px;font-size:.74rem;width:100%;outline:none;}
+select:focus,input[type=text]:focus{border-color:var(--accent);}
+.row{display:flex;gap:5px;align-items:center;}
+.row select,.row input{flex:1;}
+.btn{border:none;color:#fff;padding:6px 0;border-radius:6px;cursor:pointer;
+     font-size:.75rem;font-weight:700;width:100%;transition:opacity .15s;}
+.btn:hover{opacity:.85;}.btn:disabled{opacity:.35;cursor:default;}
+.btn-a{background:var(--accent);}.btn-b{background:var(--a2);}
+.btn-c{background:var(--a3);}.btn-d{background:var(--a4);color:#111;}
+.btn-sm{padding:3px 8px;font-size:.68rem;border-radius:4px;width:auto;flex-shrink:0;}
+.toggle-group{display:flex;border:1px solid var(--border);border-radius:var(--r-sm);overflow:hidden;}
+.toggle-group button{flex:1;background:none;border:none;color:var(--sub);
+  padding:4px 0;font-size:.68rem;cursor:pointer;transition:all .15s;}
+.toggle-group button.active{background:var(--accent);color:#fff;}
+.spinner{display:none;width:14px;height:14px;border:2px solid rgba(255,255,255,.12);
+         border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite;margin:0 auto;}
+@keyframes spin{to{transform:rotate(360deg)}}
+.sline{font-size:.68rem;min-height:13px;word-break:break-word;}
+.ok{color:var(--ok);}.err{color:var(--err);}.warn{color:var(--warn);}
+.badge{display:inline-block;font-size:.6rem;padding:1px 5px;border-radius:3px;
+       background:var(--panel3);color:var(--sub);margin-left:3px;vertical-align:middle;font-weight:700;}
+
+/* ── Panels ── */
+.view-panel{display:none;flex:1;overflow:hidden;}
+.view-panel.active{display:flex;}
+
+/* ── PCA-RGB grid ── */
+.grid-area{flex:1;overflow-y:auto;padding:12px;
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));
+  gap:12px;align-content:start;}
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--r);
+      overflow:hidden;cursor:zoom-in;transition:border-color .18s,transform .12s;}
+.card:hover{border-color:var(--accent);transform:translateY(-2px);}
+.card-title{font-size:.62rem;text-transform:uppercase;letter-spacing:.07em;color:var(--sub);
+            padding:5px 9px;border-bottom:1px solid var(--border);}
+.card img{width:100%;height:auto;display:block;}
+.placeholder{width:100%;aspect-ratio:16/10;display:flex;align-items:center;
+             justify-content:center;color:var(--sub2);font-size:.7rem;background:#0a0c14;}
+
+/* ── Annotate panel ── */
+#annPanel{flex-direction:column;overflow:hidden;}
+#annLayout{display:flex;flex:1;overflow:hidden;}
+#canvasWrap{flex:1;overflow:hidden;background:#090b12;
+            display:flex;align-items:center;justify-content:center;}
+#annCanvas{display:block;cursor:crosshair;max-width:100%;max-height:100%;}
+#annSide{width:260px;min-width:220px;background:var(--panel);border-left:1px solid var(--border);
+         display:flex;flex-direction:column;padding:10px;gap:8px;overflow-y:auto;flex-shrink:0;}
+#annSide h2{font-size:.62rem;text-transform:uppercase;letter-spacing:.1em;color:var(--sub);}
+
+/* classes */
+#classList{display:flex;flex-direction:column;gap:4px;max-height:220px;overflow-y:auto;width:100%;}
+.cls-item{display:flex;align-items:center;gap:6px;padding:5px 7px;border-radius:var(--r-sm);
+          border:1px solid var(--border);cursor:pointer;transition:border-color .12s;font-size:.72rem;
+          min-width:0;width:100%;}
+.cls-item.selected{border-color:var(--accent);background:rgba(108,99,255,.1);}
+.cls-item:hover{border-color:var(--border2);}
+.cls-swatch{width:14px;height:14px;border-radius:2px;flex-shrink:0;border:1px solid rgba(255,255,255,.1);}
+.cls-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.cls-del{background:none;border:none;color:var(--sub2);cursor:pointer;font-size:.75rem;padding:0 3px;line-height:1;flex-shrink:0;}
+.cls-del:hover{color:var(--err);}
+.cls-count{font-size:.62rem;color:var(--sub2);white-space:nowrap;flex-shrink:0;}
+
+/* shapes */
+#shapeList{display:flex;flex-direction:column;gap:3px;max-height:140px;overflow-y:auto;}
+.shape-item{display:flex;align-items:center;gap:5px;padding:3px 6px;
+            border-radius:4px;background:var(--panel2);font-size:.68rem;}
+.shape-del{margin-left:auto;background:none;border:none;color:var(--sub2);cursor:pointer;font-size:.72rem;}
+.shape-del:hover{color:var(--err);}
+
+/* result strip */
+#annResults{display:none;flex-shrink:0;border-top:1px solid var(--border);
+            background:var(--panel);flex-direction:column;overflow:hidden;}
+#resultStrip{display:flex;gap:10px;padding:9px;overflow-x:auto;}
+#resultStrip .card{flex:0 0 auto;width:280px;cursor:zoom-in;}
+#resultStrip .card img{height:var(--strip-h,160px);width:auto;max-width:100%;object-fit:contain;}
+#stripHandle{height:5px;background:var(--border);cursor:ns-resize;flex-shrink:0;transition:background .15s;}
+#stripHandle:hover{background:var(--accent);}
+#stripControls{display:flex;align-items:center;gap:8px;padding:4px 10px 5px;
+               border-top:1px solid var(--border);font-size:.7rem;color:var(--sub);}
+#stripControls input[type=range]{flex:1;accent-color:var(--accent);}
+
+/* ── Lightbox ── */
+#lightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.93);
+          z-index:9999;align-items:center;justify-content:center;cursor:zoom-out;}
+#lightbox.open{display:flex;}
+#lightbox img{max-width:95vw;max-height:95vh;border-radius:var(--r);box-shadow:0 0 80px #000;}
+#lb-close{position:fixed;top:12px;right:16px;font-size:1.8rem;color:#fff;
+          cursor:pointer;opacity:.55;user-select:none;line-height:1;}
+#lb-close:hover{opacity:1;}
+#lb-title{position:fixed;bottom:14px;left:50%;transform:translateX(-50%);
+          font-size:.76rem;color:rgba(255,255,255,.4);pointer-events:none;}
+
+/* ── Setup modal ── */
+#setupModal{display:flex;position:fixed;inset:0;background:rgba(0,0,0,.82);
+            z-index:8888;align-items:center;justify-content:center;}
+#setupBox{background:var(--panel2);border:1px solid var(--border);border-radius:12px;
+          padding:24px 26px;display:flex;flex-direction:column;gap:12px;
+          width:400px;max-width:95vw;}
+#setupBox h2{font-size:.9rem;font-weight:800;color:var(--accent);}
+#setupBox p{font-size:.72rem;color:var(--sub);line-height:1.5;}
+
+/* preprocess preview card */
+#preprocPreviewCard{display:none;}
+</style>
+</head>
+<body>
+
+<!-- ═══ SETUP MODAL ═══ -->
+<div id="setupModal">
+  <div id="setupBox">
+    <h2>⬡ EUPE Visualizer</h2>
+    <p>Set your image folder and load a model to begin.<br/>Classes and annotations are auto-saved per directory.</p>
+
+    <div class="ctrl">
+      <label>Image directory <span style="color:var(--sub2);font-size:.65rem;">(absolute or relative path)</span></label>
+      <div class="row">
+        <input type="text" id="setupDir" placeholder="C:\Users\you\dataset  or  ../dataset"/>
+        <button class="btn btn-a btn-sm" onclick="applyDir()">Set</button>
+      </div>
+      <span id="dirStatus" class="sline"></span>
+    </div>
+
+    <div class="ctrl"><label>Model architecture</label><select id="setupModel"></select></div>
+    <div class="ctrl"><label>Weights file</label><select id="setupWeights"></select></div>
+
+    <hr style="border:none;border-top:1px solid var(--border);"/>
+
+    <!-- Session import -->
+    <div class="ctrl">
+      <label>Import session from another directory <span style="color:var(--sub2);font-size:.65rem;">(optional — merges classes &amp; labels)</span></label>
+      <div class="row">
+        <input type="text" id="importDir" placeholder="C:\other\dir  or  ../34  or just  34"/>
+        <button class="btn btn-c btn-sm" onclick="importSession()">Import</button>
+      </div>
+      <p style="font-size:.63rem;color:var(--sub2);margin-top:2px;">Relative paths are resolved from the image directory above.</p>
+      <span id="importStatus" class="sline"></span>
+    </div>
+
+    <button class="btn btn-a" id="setupLoadBtn" onclick="loadModel()">Load Model &amp; Start</button>
+    <div class="spinner" id="setupSpinner"></div>
+    <span id="setupStatus" class="sline err"></span>
+  </div>
+</div>
+
+<!-- ═══ HEADER ═══ -->
+<header>
+  <h1>⬡ EUPE</h1>
+  <button class="nav-btn" id="prevBtn" title="Previous (←)">&#8592;</button>
+  <button class="nav-btn" id="nextBtn" title="Next (→)">&#8594;</button>
+  <span id="filename">—</span>
+  <span id="counter">—</span>
+  <span id="gmBadge" title="Global model state">⬡ 0 samples</span>
+  <div class="tab-bar">
+    <button class="tab active" id="tabAnn" onclick="switchTab('ann')">Annotate</button>
+    <button class="tab"        id="tabViz" onclick="switchTab('viz')">PCA-RGB</button>
+  </div>
+  <button class="btn btn-a btn-sm" onclick="showSetup()" style="margin-left:6px;">⚙ Config</button>
+</header>
+
+<main>
+
+<!-- ═══ PCA-RGB SIDEBAR ═══ -->
+<aside id="vizSide" style="display:none;">
+  <h2>Preprocessing</h2>
+  <div class="ctrl"><label>Method</label><select id="preprocSel"></select></div>
+  <button class="btn btn-a btn-sm" id="preprocPreviewBtn" style="margin-top:2px;">👁 Preview preprocessing</button>
+
+  <hr class="sep"/>
+  <h2>PCA Visualisation</h2>
+  <div class="ctrl">
+    <label>Foreground threshold <span class="val" id="fgVal">30</span>%</label>
+    <input type="range" id="fgSlider" min="0" max="80" value="30" step="1"/>
+  </div>
+  <button class="btn btn-a" id="pcaBtn">Generate PCA RGB</button>
+  <div class="spinner" id="pcaSpinner"></div>
+
+  <hr class="sep"/>
+  <h2>K-Means</h2>
+  <div class="ctrl">
+    <label>Clusters <span class="val" id="kVal">5</span></label>
+    <input type="range" id="kSlider" min="2" max="20" value="5" step="1"/>
+  </div>
+  <div class="ctrl">
+    <label>Cluster space</label>
+    <div class="toggle-group">
+      <button id="spaceFeatBtn" class="active" onclick="setSpace('feature')">Features <span class="badge">full-D</span></button>
+      <button id="spacePcaBtn" onclick="setSpace('pca')">PCA-RGB</button>
+    </div>
+  </div>
+  <div class="ctrl">
+    <label>Overlay blend <span class="val" id="alphaVal">50</span>%</label>
+    <input type="range" id="alphaSlider" min="0" max="100" value="50" step="5"/>
+  </div>
+  <button class="btn btn-b" id="kmeansBtn" disabled>Run K-Means</button>
+  <div class="spinner" id="kmeansSpinner"></div>
+  <hr class="sep"/>
+  <button class="btn btn-c" id="saveBtn" disabled>&#128190; Save Results</button>
+  <div id="vizStatus" class="sline"></div>
+</aside>
+
+<!-- ═══ PCA-RGB PANEL ═══ -->
+<div id="vizPanel" class="view-panel">
+  <div class="grid-area">
+    <div class="card" id="origCard" onclick="openLightbox('origCard','Original')">
+      <div class="card-title">Original</div>
+      <div class="placeholder" id="origPh">No image loaded</div>
+    </div>
+    <div class="card" id="preprocPreviewCard" onclick="openLightbox('preprocPreviewCard','Preprocessed')">
+      <div class="card-title">Preprocessed</div>
+      <div class="placeholder" id="preprocPh">Click "Preview preprocessing"</div>
+    </div>
+    <div class="card" id="pcaCard" onclick="openLightbox('pcaCard','PCA RGB')">
+      <div class="card-title">PCA RGB</div>
+      <div class="placeholder" id="pcaPh">Generate PCA RGB first</div>
+    </div>
+    <div class="card" id="maskCard"    style="display:none" onclick="openLightbox('maskCard','Mask')">
+      <div class="card-title">Mask (orig colors)</div>
+      <div class="placeholder" id="maskPh">Run K-Means</div>
+    </div>
+    <div class="card" id="labelCard"   style="display:none" onclick="openLightbox('labelCard','Labels')">
+      <div class="card-title">Label map</div>
+      <div class="placeholder" id="labelPh">Run K-Means</div>
+    </div>
+    <div class="card" id="overlayCard" style="display:none" onclick="openLightbox('overlayCard','Overlay')">
+      <div class="card-title">Overlay</div>
+      <div class="placeholder" id="overlayPh">Run K-Means</div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ ANNOTATE PANEL ═══ -->
+<div id="annPanel" class="view-panel active">
+  <div id="annLayout">
+
+    <!-- Canvas -->
+    <div id="canvasWrap"><canvas id="annCanvas"></canvas></div>
+
+    <!-- Annotation sidebar -->
+    <div id="annSide">
+
+      <h2>Drawing tool</h2>
+      <div class="toggle-group">
+        <button id="toolBboxBtn" class="active" onclick="setTool('bbox')">&#9726; Box <span class="badge">B</span></button>
+        <button id="toolPolyBtn" onclick="setTool('poly')">&#9651; Poly <span class="badge">P</span></button>
+      </div>
+      <p style="font-size:.63rem;color:var(--sub2);line-height:1.5;margin-top:2px;">
+        Box: click &amp; drag<br/>
+        Poly: click to add points, click <strong>first point</strong> or double-click to close<br/>
+        <kbd style="font-size:.6rem;background:var(--panel3);padding:1px 4px;border-radius:3px;">Del</kbd> last shape &nbsp;
+        <kbd style="font-size:.6rem;background:var(--panel3);padding:1px 4px;border-radius:3px;">Esc</kbd> cancel
+      </p>
+
+      <hr class="sep"/>
+      <div class="row" style="align-items:baseline;">
+        <h2 style="flex:1;">Classes</h2>
+        <span id="classSavedBadge" style="font-size:.6rem;color:var(--ok);display:none;">✓ saved</span>
+      </div>
+      <div id="classList"></div>
+      <div class="row" style="margin-top:4px;">
+        <input type="text" id="newClassName" placeholder="Class name…" style="font-size:.7rem;"/>
+        <input type="color" id="newClassColor" value="#6c63ff"
+               style="width:28px;height:26px;padding:1px;border-radius:4px;
+                      border:1px solid var(--border);background:var(--panel2);cursor:pointer;flex-shrink:0;"/>
+        <button class="btn btn-a btn-sm" onclick="addClass()">+</button>
+      </div>
+
+      <hr class="sep"/>
+      <div class="row" style="align-items:baseline;">
+        <h2 style="flex:1;">Annotations <span id="shapeCount" style="color:var(--text);">0</span></h2>
+        <span id="annSavedBadge" style="font-size:.6rem;color:var(--ok);display:none;">✓ saved</span>
+      </div>
+      <div id="shapeList"></div>
+
+      <hr class="sep"/>
+      <h2>Propagation</h2>
+      <div class="ctrl"><label>Preprocessing</label><select id="annPreprocSel"></select></div>
+      <div class="ctrl">
+        <label>Scope</label>
+        <div class="toggle-group">
+          <button id="scopeLocalBtn"  class="active" onclick="setScope('local')">Local</button>
+          <button id="scopeGlobalBtn" onclick="setScope('global')">Global &#9660;</button>
+        </div>
+      </div>
+      <p id="scopeDesc" style="font-size:.63rem;color:var(--sub2);line-height:1.4;">
+        Local: uses only this image's annotations.
+      </p>
+      <div class="ctrl">
+        <label>Method</label>
+        <div class="toggle-group">
+          <button id="methCentBtn" class="active" onclick="setMethod('centroid')">Centroid</button>
+          <button id="methSvmBtn"  onclick="setMethod('svm')">SVM</button>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label>Overlay blend <span class="val" id="annAlphaVal">50</span>%</label>
+        <input type="range" id="annAlphaSlider" min="0" max="100" value="50" step="5"/>
+      </div>
+      <button class="btn btn-d" id="propagateBtn" disabled>&#9654; Propagate Labels</button>
+      <div class="spinner" id="propSpinner"></div>
+
+      <!-- Watershed section — only active after propagation -->
+      <hr class="sep"/>
+      <h2>Watershed refinement</h2>
+      <div class="ctrl">
+        <label>Erosion radius <span class="val" id="wsErVal">3</span> px</label>
+        <input type="range" id="wsErSlider" min="1" max="10" value="3" step="1"/>
+      </div>
+      <button class="btn btn-c" id="watershedBtn" disabled>&#9632; Apply Watershed</button>
+      <div class="spinner" id="wsSpinner"></div>
+
+      <hr class="sep"/>
+      <h2>Global model</h2>
+      <p style="font-size:.63rem;color:var(--sub2);line-height:1.4;">Rebuild loads ALL annotated images from this session into the global model — useful after importing a session or restarting.</p>
+      <button class="btn btn-a" id="rebuildGlobalBtn">&#8635; Rebuild Global Model</button>
+      <div class="spinner" id="rebuildSpinner"></div>
+
+      <div id="annStatus" class="sline" style="margin-top:4px;"></div>
+    </div><!-- /annSide -->
+  </div><!-- /annLayout -->
+
+  <!-- Result strip -->
+  <div id="annResults">
+    <div id="stripHandle" title="Drag to resize"></div>
+    <div id="resultStrip">
+      <div class="card" id="segCard"        onclick="openLightbox('segCard','Segmentation mask')">
+        <div class="card-title">Seg mask</div>
+        <div class="placeholder" id="segPh">Propagate first</div>
+      </div>
+      <div class="card" id="segOverlayCard" onclick="openLightbox('segOverlayCard','Seg overlay')">
+        <div class="card-title">Seg overlay</div>
+        <div class="placeholder" id="segOverPh">Propagate first</div>
+      </div>
+    </div>
+    <div id="stripControls">
+      <span>Size</span>
+      <input type="range" id="stripSizeSlider" min="80" max="400" value="160" step="10"/>
+      <span id="stripSizeVal">160 px</span>
+    </div>
+  </div>
+</div><!-- /annPanel -->
+
+</main>
+
+<!-- Lightbox -->
+<div id="lightbox" onclick="closeLightbox()">
+  <span id="lb-close" onclick="closeLightbox()">&#x2715;</span>
+  <img id="lb-img" src="" alt=""/>
+  <span id="lb-title"></span>
+</div>
+
+<script>
+'use strict';
+// ─── Utils ────────────────────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const GET  = url  => fetch(url).then(r=>r.json());
+const POST = (url,body) => fetch(url,{method:'POST',
+  headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(r=>r.json());
+const DEL  = url  => fetch(url,{method:'DELETE'}).then(r=>r.json());
+
+function setSt(id,msg,cls=''){const e=$(id);e.textContent=msg;e.className='sline '+(cls||'');}
+function spin(id,on){$(id).style.display=on?'block':'none';}
+function showBadge(id,ms=2000){const e=$(id);e.style.display='inline';setTimeout(()=>e.style.display='none',ms);}
+
+function setImg(cid,pid,b64,sk){
+  const card=$(cid);
+  let img=card.querySelector('img');
+  if(!img){img=document.createElement('img');card.appendChild(img);}
+  img.src='data:image/png;base64,'+b64;
+  const ph=$(pid);if(ph)ph.style.display='none';
+  if(sk)b64store[sk]=b64;
+}
+function clearCard(cid,pid){
+  const img=$(cid).querySelector('img');if(img)img.remove();
+  const ph=$(pid);if(ph)ph.style.display='';
+}
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let currentIdx=0,totalImages=0,imgNatW=0,imgNatH=0;
+let pcaDone=false,kmDone=false,propDone=false;
+let clusterSpace='feature',propScope='local',propMethod='centroid';
+const b64store={};
+let classes=[],shapes=[],selectedCls=null,activeTool='bbox';
+let canvasImg=null,drawing=false,startX=0,startY=0,_mx=0,_my=0,polyPts=[];
+let activeTab='ann';
+
+// ─── Setup ────────────────────────────────────────────────────────────────────
+async function initSetup(){
+  const d=await GET('/api/config');
+  const opts=Object.entries(d.preproc_methods)
+    .map(([k,v])=>`<option value="${k}">${v}</option>`).join('');
+  $('preprocSel').innerHTML=$('annPreprocSel').innerHTML=opts;
+
+  $('setupModel').innerHTML=d.models.map(m=>`<option value="${m}">${m}</option>`).join('');
+  // pre-select default model from config
+  if(d.default_model)$('setupModel').value=d.default_model;
+  else if(d.model_name)$('setupModel').value=d.model_name;
+
+  $('setupWeights').innerHTML=d.weight_files.map(w=>`<option value="${w}">${w}</option>`).join('');
+  // pre-select default weights from config
+  if(d.default_weights){
+    const opt=[...$('setupWeights').options].find(o=>o.value===d.default_weights);
+    if(opt)$('setupWeights').value=d.default_weights;
+  }
+
+  if(d.image_dir)$('setupDir').value=d.image_dir;
+  updateGmBadge(d.global_model||{});
+
+  if(d.n_images>0&&d.model_name){
+    $('setupModal').style.display='none';
+    totalImages=d.n_images;
+    loadImage(0);
+  }
+}
+function showSetup(){$('setupModal').style.display='flex';}
+
+async function applyDir(){
+  const dir=$('setupDir').value.trim();if(!dir)return;
+  const d=await POST('/api/set_image_dir',{dir});
+  if(d.error){setSt('dirStatus','✗ '+d.error,'err');return;}
+  // Show resolved absolute path so user can confirm it's the right folder
+  const resolved=d.dir||dir;
+  setSt('dirStatus','✓ '+d.n_images+' images  →  '+resolved,'ok');
+  // Fill the field with the resolved absolute path for clarity
+  $('setupDir').value=resolved;
+  totalImages=d.n_images;
+  if(d.session)applySessionClasses(d.session);
+  // Session may have shapes — poll to see if background rebuild fires
+  _pollGmStatus();
+}
+
+async function importSession(){
+  const src=$('importDir').value.trim();
+  if(!src){setSt('importStatus','Enter a directory path.','warn');return;}
+  const idir=$('setupDir').value.trim();
+  if(!idir){setSt('importStatus','Set your image directory first (click Set).','warn');return;}
+  setSt('importStatus','Importing…');
+  const d=await POST('/api/import_session',{source_dir:src});
+  if(d.error){setSt('importStatus','✗ '+d.error,'err');return;}
+  if(d.session)applySessionClasses(d.session);
+  const rp=d.resolved_path?'  ('+d.resolved_path+')':'';  setSt('importStatus','✓ '+d.imported_shapes+' annotations from '+d.imported_files+' images'+rp,'ok');
+}
+
+async function loadModel(){
+  const model=$('setupModel').value,wfile=$('setupWeights').value;
+  if(!wfile){$('setupStatus').textContent='Select a weight file';return;}
+  $('setupLoadBtn').disabled=true;spin('setupSpinner',true);$('setupStatus').textContent='';
+  try{
+    const d=await POST('/api/load_model',{model,weight_file:wfile});
+    if(d.error){$('setupStatus').textContent='✗ '+d.error;return;}
+    $('setupModal').style.display='none';
+    // Show initial gm stats (may be 0 while rebuild runs in background)
+    if(d.global_model)updateGmBadge(d.global_model);
+    if(totalImages===0){setSt('annStatus','Model loaded. Set a directory.','ok');return;}
+    loadImage(0);
+    // Poll global model status for a few seconds while background rebuild runs
+    _pollGmStatus();
+  }finally{$('setupLoadBtn').disabled=false;spin('setupSpinner',false);}
+}
+
+// Poll /api/global_model_status until n_samples stabilises (background rebuild)
+let _gmPollTimer=null;
+function _pollGmStatus(){
+  clearTimeout(_gmPollTimer);
+  setGmBuilding();
+  let tries=0,lastN=-1;
+  async function poll(){
+    try{
+      const d=await GET('/api/global_model_status');
+      updateGmBadge(d);
+      $('gmBadge').style.color='';   // reset warn colour once done
+      // Keep polling for up to 120s, or until count stabilises
+      if(tries<120 && (d.n_samples>0 || tries<10)){
+        tries++;
+        // slow down after initial burst
+        const delay=tries<10?1000:3000;
+        _gmPollTimer=setTimeout(poll, delay);
+      }
+    }catch(e){}
+  }
+  _gmPollTimer=setTimeout(poll,1000);
+}
+
+// ─── Tab ──────────────────────────────────────────────────────────────────────
+function switchTab(t){
+  activeTab=t;
+  ['ann','viz'].forEach(id=>{
+    $(id+'Panel').classList.toggle('active',id===t);
+    $('tab'+id.charAt(0).toUpperCase()+id.slice(1)).classList.toggle('active',id===t);
+  });
+  $('vizSide').style.display=t==='viz'?'':'none';
+  if(t==='ann'&&canvasImg){initCanvas();redrawCanvas();}
+}
+
+// ─── Load image ───────────────────────────────────────────────────────────────
+async function loadImage(idx){
+  pcaDone=false;kmDone=false;propDone=false;
+  $('kmeansBtn').disabled=true;$('saveBtn').disabled=true;
+  $('watershedBtn').disabled=true;
+  ['pcaCard','maskCard','labelCard','overlayCard'].forEach(id=>$(id).style.display='none');
+  clearCard('pcaCard','pcaPh');clearCard('origCard','origPh');
+  $('preprocPreviewCard').style.display='none';
+  clearCard('preprocPreviewCard','preprocPh');
+  Object.keys(b64store).forEach(k=>delete b64store[k]);
+  setSt('vizStatus','');
+  // ann reset
+  shapes=[];polyPts=[];drawing=false;
+  renderShapeList();updatePropBtn();setSt('annStatus','');
+  $('annResults').style.display='none';
+  clearCard('segCard','segPh');clearCard('segOverlayCard','segOverPh');
+
+  const d=await GET('/api/image?idx='+idx);
+  if(d.error){setSt('annStatus','✗ '+d.error,'err');return;}
+  currentIdx=d.idx;totalImages=d.total;
+  imgNatW=d.width;imgNatH=d.height;
+  $('filename').textContent=d.name;
+  $('counter').textContent=(d.idx+1)+' / '+d.total;
+  setImg('origCard','origPh',d.thumb,'thumb');
+  $('pcaCard').style.display='';
+
+  // Always sync classes from session (handles first load, dir reload, navigation)
+  if(d.session) applySessionClasses(d.session);
+
+  // Restore shapes from session
+  shapes=(d.shapes||[]).map(s=>({...s}));
+  renderShapeList();updatePropBtn();
+
+  // Load existing mask/overlay if they exist on disk
+  if(d.existing_mask){
+    $('annResults').style.display='flex';
+    $('annResults').style.flexDirection='column';
+    setImg('segCard','segPh',d.existing_mask,'seg_mask');
+    propDone=true;
+    $('watershedBtn').disabled=false;
+    installReblend();
+  }
+  if(d.existing_overlay){
+    setImg('segOverlayCard','segOverPh',d.existing_overlay,'seg_overlay');
+  }
+  if(d.existing_mask){
+    setSt('annStatus','Mask loaded from disk','ok');
+  }
+
+  canvasImg=new Image();
+  canvasImg.onload=()=>{initCanvas();redrawCanvas();};
+  canvasImg.src='data:image/png;base64,'+d.thumb;
+}
+
+// ─── PCA-RGB tab ──────────────────────────────────────────────────────────────
+$('fgSlider').addEventListener('input',   ()=>$('fgVal').textContent   =$('fgSlider').value);
+$('kSlider').addEventListener('input',    ()=>$('kVal').textContent    =$('kSlider').value);
+$('alphaSlider').addEventListener('input',()=>$('alphaVal').textContent=$('alphaSlider').value);
+
+// Preprocessing preview
+$('preprocPreviewBtn').addEventListener('click',async()=>{
+  const preproc=$('preprocSel').value;
+  if(preproc==='none'){setSt('vizStatus','Select a preprocessing method first.','warn');return;}
+  setSt('vizStatus','Preprocessing image…');
+  try{
+    const d=await GET('/api/preprocess_preview?idx='+currentIdx+'&preproc='+preproc);
+    if(d.error){setSt('vizStatus','✗ '+d.error,'err');return;}
+    $('preprocPreviewCard').style.display='';
+    setImg('preprocPreviewCard','preprocPh',d.preview);
+    setSt('vizStatus','Preprocessing preview ✓','ok');
+  }catch(e){setSt('vizStatus','✗ '+e,'err');}
+});
+
+$('pcaBtn').addEventListener('click',async()=>{
+  $('pcaBtn').disabled=true;spin('pcaSpinner',true);setSt('vizStatus','Computing PCA…');
+  try{
+    const d=await GET('/api/pca?idx='+currentIdx+'&fg_pct='+$('fgSlider').value+'&preproc='+$('preprocSel').value);
+    if(d.error){setSt('vizStatus','✗ '+d.error,'err');return;}
+    setImg('pcaCard','pcaPh',d.pca_rgb,'pca_rgb');
+    pcaDone=true;$('kmeansBtn').disabled=false;setSt('vizStatus','PCA done ✓','ok');
+  }finally{$('pcaBtn').disabled=false;spin('pcaSpinner',false);}
+});
+
+function setSpace(s){
+  clusterSpace=s;
+  $('spaceFeatBtn').classList.toggle('active',s==='feature');
+  $('spacePcaBtn').classList.toggle('active',s==='pca');
+}
+
+$('kmeansBtn').addEventListener('click',async()=>{
+  $('kmeansBtn').disabled=true;spin('kmeansSpinner',true);setSt('vizStatus','Running k-means…');
+  try{
+    const k=$('kSlider').value,fg=$('fgSlider').value;
+    const alpha=($('alphaSlider').value/100).toFixed(2),preproc=$('preprocSel').value;
+    const d=await GET('/api/kmeans?idx='+currentIdx+'&k='+k+'&fg_pct='+fg+'&space='+clusterSpace+'&alpha='+alpha+'&preproc='+preproc);
+    if(d.error){setSt('vizStatus','✗ '+d.error,'err');return;}
+    setImg('pcaCard','pcaPh',d.pca_rgb,'pca_rgb');
+    setImg('maskCard','maskPh',d.mask_img,'mask_img');
+    setImg('labelCard','labelPh',d.label_img,'label_img');
+    setImg('overlayCard','overlayPh',d.overlay,'overlay');
+    ['maskCard','labelCard','overlayCard'].forEach(id=>$(id).style.display='');
+    kmDone=true;$('saveBtn').disabled=false;
+    setSt('vizStatus','K-means ✓ (k='+k+', '+clusterSpace+')','ok');
+  }finally{$('kmeansBtn').disabled=!pcaDone;spin('kmeansSpinner',false);}
+});
+
+$('saveBtn').addEventListener('click',async()=>{
+  $('saveBtn').disabled=true;setSt('vizStatus','Saving…');
+  try{
+    const d=await POST('/api/save',{idx:currentIdx,...b64store});
+    if(d.error){setSt('vizStatus','✗ '+d.error,'err');return;}
+    setSt('vizStatus','✓ Saved '+d.saved.length+' files','ok');
+  }finally{$('saveBtn').disabled=!kmDone;}
+});
+
+// ─── Classes ──────────────────────────────────────────────────────────────────
+function hexToRgb(h){return[parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
+function rgbToHex(c){return'#'+c.map(v=>v.toString(16).padStart(2,'0')).join('');}
+
+function applySessionClasses(s){
+  classes=(s.classes||[]).map(c=>({...c,hex:c.hex||rgbToHex(c.color)}));
+  renderClassList();
+  // Only auto-select if nothing is selected or current selection was deleted
+  const stillValid=classes.some(c=>c.id===selectedCls);
+  if(!stillValid){
+    selectedCls=classes.length?classes[0].id:null;
+  }
+  if(selectedCls)selectClass(selectedCls);
+}
+
+async function addClass(){
+  const name=$('newClassName').value.trim()||'Class '+(classes.length+1);
+  const hex=$('newClassColor').value,color=hexToRgb(hex);
+  const d=await POST('/api/session/class',{name,color,hex});
+  if(d.error){alert(d.error);return;}
+  classes=d.session.classes.map(c=>({...c,hex:c.hex||rgbToHex(c.color)}));
+  $('newClassName').value='';renderClassList();selectClass(d.class.id);showBadge('classSavedBadge');
+}
+
+async function deleteClass(id){
+  if(!confirm('Delete class and all its annotations?'))return;
+  const d=await DEL('/api/session/class/'+id);
+  if(d.error){alert(d.error);return;}
+  classes=d.session.classes.map(c=>({...c,hex:c.hex||rgbToHex(c.color)}));
+  shapes=shapes.filter(s=>s.class_id!==id);
+  if(selectedCls===id)selectedCls=classes.length?classes[0].id:null;
+  renderClassList();renderShapeList();redrawCanvas();updatePropBtn();showBadge('classSavedBadge');
+}
+
+function selectClass(id){
+  selectedCls=id;
+  document.querySelectorAll('.cls-item').forEach(el=>el.classList.toggle('selected',+el.dataset.id===id));
+}
+
+function renderClassList(){
+  const counts={};shapes.forEach(s=>{counts[s.class_id]=(counts[s.class_id]||0)+1;});
+  $('classList').innerHTML=classes.map(c=>`
+    <div class="cls-item" data-id="${c.id}" onclick="selectClass(${c.id})">
+      <div class="cls-swatch" style="background:${c.hex}"></div>
+      <span class="cls-name">${c.name}</span>
+      ${counts[c.id]?`<span class="cls-count">${counts[c.id]}</span>`:''}
+      <button class="cls-del" onclick="event.stopPropagation();deleteClass(${c.id})">✕</button>
+    </div>`).join('');
+  if(selectedCls)selectClass(selectedCls);
+}
+
+// ─── Shapes ───────────────────────────────────────────────────────────────────
+async function _persist(){
+  const fn=$('filename').textContent;
+  if(!fn||fn==='—')return;
+  const d=await POST('/api/session/shapes',{
+    filename:fn,
+    shapes:shapes.map(s=>({type:s.type,class_id:s.class_id,coords:s.coords}))
+  });
+  if(!d.error)showBadge('annSavedBadge');
+}
+
+function renderShapeList(){
+  $('shapeCount').textContent=shapes.length;renderClassList();
+  $('shapeList').innerHTML=shapes.map((s,i)=>{
+    const c=classes.find(x=>x.id===s.class_id)||{name:'?',hex:'#888'};
+    return `<div class="shape-item">
+      <div class="shape-swatch" style="background:${c.hex}"></div>
+      <span>${s.type==='bbox'?'☐ Box':'⬡ Poly'} — ${c.name}</span>
+      <button class="shape-del" onclick="deleteShape(${i})">✕</button>
+    </div>`;
+  }).join('');
+  updatePropBtn();
+}
+
+async function deleteShape(i){shapes.splice(i,1);renderShapeList();redrawCanvas();await _persist();}
+function updatePropBtn(){$('propagateBtn').disabled=shapes.length===0||classes.length===0;}
+
+// ─── Canvas ───────────────────────────────────────────────────────────────────
+const canvas=$('annCanvas'),ctx=canvas.getContext('2d');
+// Pixel-snapping distance to close a polygon by clicking the first point (px)
+const POLY_CLOSE_DIST = 12;
+
+function setTool(t){
+  activeTool=t;polyPts=[];drawing=false;
+  $('toolBboxBtn').classList.toggle('active',t==='bbox');
+  $('toolPolyBtn').classList.toggle('active',t==='poly');
+  redrawCanvas();
+}
+function setScope(s){
+  propScope=s;
+  $('scopeLocalBtn').classList.toggle('active',s==='local');
+  $('scopeGlobalBtn').classList.toggle('active',s==='global');
+  $('scopeDesc').innerHTML=s==='global'
+    ?'<strong style="color:var(--a4)">Global</strong>: trains on <em>all</em> annotated images.'
+    :'Local: uses only this image\'s annotations.';
+}
+function setMethod(m){
+  propMethod=m;
+  $('methCentBtn').classList.toggle('active',m==='centroid');
+  $('methSvmBtn').classList.toggle('active',m==='svm');
+}
+
+$('wsErSlider').addEventListener('input',()=>$('wsErVal').textContent=$('wsErSlider').value);
+$('annAlphaSlider').addEventListener('input',()=>$('annAlphaVal').textContent=$('annAlphaSlider').value);
+
+function initCanvas(){
+  const w=$('canvasWrap');
+  if(!canvasImg)return;
+  const r=Math.min((w.clientWidth||800)/canvasImg.naturalWidth,(w.clientHeight||600)/canvasImg.naturalHeight,1);
+  canvas.width=Math.round(canvasImg.naturalWidth*r);
+  canvas.height=Math.round(canvasImg.naturalHeight*r);
+}
+
+function c2i(cx,cy){return[cx*imgNatW/canvas.width,cy*imgNatH/canvas.height];}
+function i2c(ix,iy){return[ix*canvas.width/imgNatW,iy*canvas.height/imgNatH];}
+function xy(e){const r=canvas.getBoundingClientRect();return[e.clientX-r.left,e.clientY-r.top];}
+function dist2(ax,ay,bx,by){return Math.hypot(ax-bx,ay-by);}
+
+function _cc(s){
+  if(s.type==='bbox'){const[x1,y1,x2,y2]=s.coords;return[...i2c(x1,y1),...i2c(x2,y2)];}
+  return s.coords.map(([ix,iy])=>i2c(ix,iy));
+}
+
+function redrawCanvas(){
+  if(!canvasImg)return;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(canvasImg,0,0,canvas.width,canvas.height);
+  shapes.forEach(s=>{
+    const c=classes.find(x=>x.id===s.class_id)||{hex:'#6c63ff'};
+    ctx.strokeStyle=c.hex;ctx.fillStyle=c.hex+'44';ctx.lineWidth=2;ctx.setLineDash([]);
+    const cc=_cc(s);
+    if(s.type==='bbox'){
+      const[cx1,cy1,cx2,cy2]=cc;
+      ctx.beginPath();ctx.rect(cx1,cy1,cx2-cx1,cy2-cy1);ctx.fill();ctx.stroke();
+      ctx.fillStyle=c.hex;ctx.font='bold 11px system-ui';ctx.fillText(c.name,cx1+3,cy1+13);
+    } else {
+      ctx.beginPath();cc.forEach(([px,py],i)=>i?ctx.lineTo(px,py):ctx.moveTo(px,py));
+      ctx.closePath();ctx.fill();ctx.stroke();
+    }
+  });
+
+  if(activeTool==='poly'&&polyPts.length){
+    const cls=classes.find(c=>c.id===selectedCls)||{hex:'#6c63ff'};
+    ctx.strokeStyle='rgba(255,255,255,.8)';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);
+    ctx.beginPath();
+    polyPts.forEach(([px,py],i)=>i?ctx.lineTo(px,py):ctx.moveTo(px,py));
+    ctx.lineTo(_mx,_my);ctx.stroke();ctx.setLineDash([]);
+    // draw vertices
+    polyPts.forEach(([px,py],i)=>{
+      // first point: larger circle to indicate close target
+      const isFirst=i===0;
+      ctx.beginPath();ctx.arc(px,py,isFirst?6:3,0,Math.PI*2);
+      ctx.fillStyle=isFirst?cls.hex:'#fff';ctx.fill();
+      if(isFirst){ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();}
+    });
+  }
+
+  if(activeTool==='bbox'&&drawing){
+    ctx.strokeStyle='rgba(255,255,255,.8)';ctx.lineWidth=1.5;ctx.setLineDash([4,3]);
+    ctx.beginPath();ctx.rect(startX,startY,_mx-startX,_my-startY);ctx.stroke();ctx.setLineDash([]);
+  }
+}
+
+canvas.addEventListener('mousemove',e=>{
+  [_mx,_my]=xy(e);
+  if(drawing||activeTool==='poly')redrawCanvas();
+  // Change cursor when near first poly point
+  if(activeTool==='poly'&&polyPts.length>=2){
+    const[px,py]=polyPts[0];
+    canvas.style.cursor=dist2(_mx,_my,px,py)<=POLY_CLOSE_DIST?'cell':'crosshair';
+  }
+});
+
+canvas.addEventListener('mousedown',e=>{
+  if(e.button!==0)return;
+  if(!selectedCls){setSt('annStatus','Select a class first.','err');return;}
+  [startX,startY]=xy(e);
+  if(activeTool==='bbox'){drawing=true;}
+  else {
+    // Check if clicking near first point to close polygon
+    if(polyPts.length>=3){
+      const[px,py]=polyPts[0];
+      if(dist2(startX,startY,px,py)<=POLY_CLOSE_DIST){
+        _closePoly();return;
+      }
+    }
+    polyPts.push([startX,startY]);redrawCanvas();
+  }
+});
+
+canvas.addEventListener('mouseup',e=>{
+  if(activeTool==='bbox'&&drawing){
+    drawing=false;
+    const[ex,ey]=xy(e);
+    const cx1=Math.min(startX,ex),cy1=Math.min(startY,ey);
+    const cx2=Math.max(startX,ex),cy2=Math.max(startY,ey);
+    if(Math.abs(cx2-cx1)<3||Math.abs(cy2-cy1)<3){redrawCanvas();return;}
+    shapes.push({type:'bbox',class_id:selectedCls,coords:[...c2i(cx1,cy1),...c2i(cx2,cy2)]});
+    renderShapeList();redrawCanvas();_persist();
+  }
+});
+
+// Double-click also closes polygon
+canvas.addEventListener('dblclick',e=>{
+  if(activeTool==='poly'&&polyPts.length>=3){_closePoly();}
+});
+
+function _closePoly(){
+  shapes.push({type:'polygon',class_id:selectedCls,
+               coords:polyPts.map(([cx,cy])=>c2i(cx,cy))});
+  polyPts=[];renderShapeList();redrawCanvas();_persist();
+}
+
+// ─── Propagation ──────────────────────────────────────────────────────────────
+$('propagateBtn').addEventListener('click',async()=>{
+  $('propagateBtn').disabled=true;spin('propSpinner',true);setSt('annStatus','Propagating…');
+  try{
+    const anns=shapes.map(s=>({
+      class_id:s.class_id,
+      class_color:(classes.find(c=>c.id===s.class_id)||{color:[128,128,128]}).color,
+      type:s.type==='bbox'?'bbox':'polygon',
+      coords:s.coords
+    }));
+    const alpha=($('annAlphaSlider').value/100).toFixed(2);
+    const d=await POST('/api/propagate',{
+      idx:currentIdx,annotations:anns,method:propMethod,
+      scope:propScope,watershed:false,
+      ws_erosions:parseInt($('wsErSlider').value),
+      alpha:parseFloat(alpha),
+      preproc:$('annPreprocSel').value,
+    });
+    if(d.error){setSt('annStatus','✗ '+d.error,'err');return;}
+    $('annResults').style.display='flex';
+    $('annResults').style.flexDirection='column';
+    setImg('segCard','segPh',d.seg_mask,'seg_mask');
+    setImg('segOverlayCard','segOverPh',d.overlay,'seg_overlay');
+    propDone=true;$('watershedBtn').disabled=false;
+    updateGmBadge(d.global_model||{});
+    const saved=d.saved?'· '+d.saved.length+' files saved':'';
+    setSt('annStatus','✓ '+d.class_info.length+' classes ('+propMethod+') '+saved,'ok');
+    installReblend();
+  }finally{
+    $('propagateBtn').disabled=shapes.length===0;spin('propSpinner',false);
+  }
+});
+
+// ─── Watershed on demand ──────────────────────────────────────────────────────
+$('rebuildGlobalBtn').addEventListener('click',async()=>{
+  $('rebuildGlobalBtn').disabled=true;spin('rebuildSpinner',true);setSt('annStatus','Rebuilding global model…');
+  try{
+    const d=await POST('/api/rebuild_global',{preproc:$('annPreprocSel').value});
+    if(d.error){setSt('annStatus','✗ '+d.error,'err');return;}
+    updateGmBadge(d.global_model||{});
+    setSt('annStatus','Global model rebuilt ✓ ('+d.images_processed+' images)','ok');
+  }finally{$('rebuildGlobalBtn').disabled=false;spin('rebuildSpinner',false);}
+});
+
+$('watershedBtn').addEventListener('click',async()=>{
+  $('watershedBtn').disabled=true;spin('wsSpinner',true);setSt('annStatus','Applying watershed…');
+  try{
+    const alpha=($('annAlphaSlider').value/100).toFixed(2);
+    const d=await POST('/api/watershed',{
+      idx:currentIdx,
+      ws_erosions:parseInt($('wsErSlider').value),
+      alpha:parseFloat(alpha),
+    });
+    if(d.error){setSt('annStatus','✗ '+d.error,'err');return;}
+    setImg('segCard','segPh',d.seg_mask,'seg_mask');
+    setImg('segOverlayCard','segOverPh',d.overlay,'seg_overlay');
+    setSt('annStatus','Watershed done ✓ · '+d.saved.length+' files saved','ok');
+  }finally{$('watershedBtn').disabled=!propDone;spin('wsSpinner',false);}
+});
+
+// ─── Live reblend ─────────────────────────────────────────────────────────────
+let reblendTimer=null;
+function installReblend(){
+  // Remove previous listener to avoid duplicates
+  const slider=$('annAlphaSlider');
+  const newSlider=slider.cloneNode(true);
+  slider.parentNode.replaceChild(newSlider,slider);
+  newSlider.addEventListener('input',()=>{
+    $('annAlphaVal').textContent=newSlider.value;
+    clearTimeout(reblendTimer);
+    reblendTimer=setTimeout(async()=>{
+      const alpha=(newSlider.value/100).toFixed(2);
+      const d=await POST('/api/reblend',{idx:currentIdx,alpha:parseFloat(alpha)});
+      if(d.overlay)setImg('segOverlayCard','segOverPh',d.overlay,'seg_overlay');
+    },80);
+  });
+}
+
+// ─── Strip resize ─────────────────────────────────────────────────────────────
+$('stripSizeSlider').addEventListener('input',()=>{
+  const v=$('stripSizeSlider').value;
+  $('stripSizeVal').textContent=v+' px';
+  document.documentElement.style.setProperty('--strip-h',v+'px');
+  $('resultStrip').style.height=(parseInt(v)+30)+'px';
+});
+document.documentElement.style.setProperty('--strip-h','160px');
+$('resultStrip').style.height='190px';
+{
+  const handle=$('stripHandle');
+  let dragging=false,startY_h=0,startH=0;
+  handle.addEventListener('mousedown',e=>{dragging=true;startY_h=e.clientY;startH=$('resultStrip').offsetHeight;e.preventDefault();});
+  document.addEventListener('mousemove',e=>{
+    if(!dragging)return;
+    const newH=Math.max(60,Math.min(500,startH+(startY_h-e.clientY)));
+    $('resultStrip').style.height=newH+'px';
+    const imgH=Math.max(50,newH-30);
+    document.documentElement.style.setProperty('--strip-h',imgH+'px');
+    $('stripSizeSlider').value=imgH;
+    $('stripSizeVal').textContent=imgH+' px';
+  });
+  document.addEventListener('mouseup',()=>dragging=false);
+}
+
+// ─── Global model badge ───────────────────────────────────────────────────────
+function updateGmBadge(gm){
+  const badge=$('gmBadge');
+  if(!gm||!gm.n_samples){
+    // Check if session has shapes — if so, rebuild is probably in progress
+    const hasShapes=Object.keys(classes).length>0||document.querySelectorAll('.shape-item').length>0;
+    badge.classList.remove('has-data');
+    return;
+  }
+  badge.textContent='⬡ '+gm.n_samples+' samples · '+gm.n_classes+' cls · '+gm.n_images_labelled+' imgs';
+  badge.classList.add('has-data');
+  $('scopeGlobalBtn').style.color=gm.n_samples?'var(--a4)':'';
+}
+
+function setGmBuilding(){
+  const badge=$('gmBadge');
+  badge.textContent='⬡ building global model…';
+  badge.classList.add('has-data');
+  badge.style.color='var(--warn)';
+}
+
+// ─── Lightbox ─────────────────────────────────────────────────────────────────
+function openLightbox(cid,title){
+  const img=$(cid).querySelector('img');if(!img)return;
+  $('lb-img').src=img.src;$('lb-title').textContent=title;
+  $('lightbox').classList.add('open');
+}
+function closeLightbox(){$('lightbox').classList.remove('open');}
+
+// ─── Keyboard ─────────────────────────────────────────────────────────────────
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if($('lightbox').classList.contains('open')){closeLightbox();return;}
+    polyPts=[];drawing=false;redrawCanvas();return;
+  }
+  if($('lightbox').classList.contains('open'))return;
+  const t=document.activeElement.tagName;
+  if(t==='INPUT'||t==='SELECT'||t==='TEXTAREA')return;
+  if(e.key==='Delete'||e.key==='Backspace'){
+    if(polyPts.length){polyPts.pop();redrawCanvas();return;}
+    if(shapes.length){shapes.pop();renderShapeList();redrawCanvas();_persist();}return;
+  }
+  if(e.key==='ArrowLeft')navigate(-1);
+  if(e.key==='ArrowRight')navigate(+1);
+  if(e.key==='b'||e.key==='B')setTool('bbox');
+  if(e.key==='p'||e.key==='P')setTool('poly');
+  if(e.key==='Enter'&&activeTool==='poly'&&polyPts.length>=3)_closePoly();
+});
+
+// ─── Navigation ───────────────────────────────────────────────────────────────
+function navigate(delta){if(totalImages===0)return;loadImage(((currentIdx+delta)%totalImages+totalImages)%totalImages);}
+$('prevBtn').addEventListener('click',()=>navigate(-1));
+$('nextBtn').addEventListener('click',()=>navigate(+1));
+
+new ResizeObserver(()=>{if(canvasImg&&activeTab==='ann'){initCanvas();redrawCanvas();}}).observe($('canvasWrap'));
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+initSetup();
+</script>
+</body>
+</html>
