@@ -1,4 +1,4 @@
-# EUPE Segmenter
+# EUPE Visualizer
 
 An interactive web-based tool for **dense segmentation** of images using [EUPE](https://github.com/your-org/EUPE) (End-to-end Unified Patch Embeddings) features.
 

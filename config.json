@@ -1,0 +1,13 @@
+{
+  "repo_dir":         "EUPE",
+  "weights_dir":      "EUPE/weights",
+  "default_model":    "eupe_vitb16",
+  "default_weights":  "EUPE-ViT-B.pt",
+  "default_preproc":  "none",
+  "host":             "127.0.0.1",
+  "port":             5000,
+
+  "tile_px":    448,
+  "overlap":    0.25,
+  "max_batch":  16
+}
