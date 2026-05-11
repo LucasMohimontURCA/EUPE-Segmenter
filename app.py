@@ -147,10 +147,40 @@ def _get_features(image_path: Path, preproc: str) -> dict:
     return entry
 
 
+def _evict_cache(max_entries: int = 20) -> None:
+    """
+    Keep STATE["cache"] under max_entries to bound RAM usage.
+    Removes oldest-inserted entries (dict preserves insertion order, Python 3.7+).
+    Default: 20 entries × ~25 MB ≈ 500 MB headroom on 32 GB RAM.
+    Override via config.json "cache_max_entries".
+    """
+    with STATE["lock"]:
+        while len(STATE["cache"]) > max_entries:
+            del STATE["cache"][next(iter(STATE["cache"]))]
+
+
+def _extract_features_nocache(image_path: Path, preproc: str) -> np.ndarray:
+    """
+    Extract features WITHOUT caching — used by batch so 100+ images
+    don't accumulate in RAM. Returns the raw (gh, gw, D) array only;
+    caller is responsible for discarding it after use.
+    """
+    image = pp.preprocess(Image.open(image_path).convert("RGB"), preproc)
+    ps    = core.PATCH_SIZE.get(STATE["model_name"], 16)
+    return core.extract_features(
+        STATE["model"], image, STATE["device"],
+        tile_px   = CFG.get("tile_px",   448),
+        overlap   = CFG.get("overlap",   0.5),
+        patch_size= ps,
+        max_batch = CFG.get("max_batch", core.MAX_BATCH),
+    ), image.size
+
+
 def _prefetch(image_path: Path, preproc: str) -> None:
     """Fire-and-forget background feature extraction for the next image."""
     try:
         _get_features(image_path, preproc)
+        _evict_cache(CFG.get("cache_max_entries", 20))
     except Exception:
         pass
 
@@ -207,9 +237,12 @@ def _auto_save_mask(path: Path, lbl_up: np.ndarray,
 
 def _trigger_background_rebuild() -> None:
     """
-    Start a background thread to rebuild the GlobalModel from session shapes.
-    Only fires if both model and session shapes are present.
-    Silently skips if nothing to do.
+    Manually-triggered rebuild of the GlobalModel from session shapes.
+    Called ONLY from:
+      - /api/rebuild_global  (explicit UI button)
+      - /api/import_session  (after merging foreign shapes)
+    NOT called automatically on startup or navigation to avoid loading
+    every annotated image into memory silently.
     """
     session = STATE["session"]
     has_shapes = any(v for v in session["shapes"].values())
@@ -256,14 +289,13 @@ def _rebuild_global_model(preproc: str = "none") -> int:
             for s in shapes
         ]
         try:
-            e   = _get_features(path, preproc)
-            img = Image.open(path).convert("RGB")
+            feats, img_size = _extract_features_nocache(path, preproc)
             X, y_idx, cid2idx = core.collect_annotation_samples(
-                e["features"], img.size, anns)
+                feats, img_size, anns)
+            del feats   # free immediately — never accumulate in RAM
             idx_to_cid = {v: k for k, v in cid2idx.items()}
             y_cid = np.array([idx_to_cid[i] for i in y_idx], dtype=np.int32)
             gm.add_samples(X, y_cid, fname, cid2idx)
-            gm.clf = None
             processed += 1
         except Exception as ex:
             import traceback as _tb
@@ -333,8 +365,6 @@ def api_set_image_dir():
         STATE["last_prop"]  = {}
         STATE["session"]    = loaded
         STATE["global_model"].reset()
-    # If model already loaded, rebuild global model from newly-loaded session
-    _trigger_background_rebuild()
     return jsonify({"n_images": len(imgs), "dir": str(d),
                     "session": sess.export_summary(loaded)})
 
@@ -355,8 +385,6 @@ def api_load_model():
             STATE["model"]      = m
             STATE["cache"]      = {}
             STATE["global_model"].reset()
-        # Rebuild global model in background if session already has annotations
-        _trigger_background_rebuild()
         gm = STATE["global_model"]
         return jsonify({
             "ok":    True,
@@ -406,15 +434,6 @@ def api_image():
                 }
         except Exception:
             pass   # non-fatal
-
-    # Prefetch features for adjacent images in background
-    preproc = request.args.get("preproc", CFG.get("default_preproc", "none"))
-    for delta in (1, -1):
-        nxt = (idx + delta) % len(imgs)
-        if nxt != idx:
-            threading.Thread(
-                target=_prefetch, args=(imgs[nxt], preproc), daemon=True
-            ).start()
 
     return jsonify({
         "idx":            idx,
@@ -544,62 +563,53 @@ def api_save_shapes():
 @app.route("/api/import_session", methods=["POST"])
 def api_import_session():
     """
-    Merge a session.json from another directory into the current session.
-    Body: {"source_dir": str}
-
-    Behaviour
-    ---------
-    • Classes are merged by name: if a class with the same name already exists
-      in the current session its id is reused; otherwise a new id is assigned.
-      This avoids id collisions when two directories used independently.
-    • Shapes are imported per filename, skipping filenames that are not present
-      in the current image list (different dataset).
-    • class_id_seq is bumped if new IDs are minted.
-    • The global model is reset — it will be rebuilt on the next propagation
-      from the combined set of annotated images.
+    Merge a session from another directory into the current session.
+    Works for both same-dataset (shapes added to canvas) and cross-dataset
+    (features extracted from source images and fed to global model).
+    Returns immediately; feature extraction runs in a background thread.
     """
     idir = STATE["image_dir"]
     if idir is None:
         return jsonify({"error": "Set an image directory first."}), 400
-    body     = request.json or {}
-    src_str  = body.get("source_dir", "").strip()
+    if not STATE["model"]:
+        return jsonify({"error": "Load a model before importing a session."}), 400
+
+    body    = request.json or {}
+    src_str = body.get("source_dir", "").strip()
     if not src_str:
         return jsonify({"error": "No source directory provided."}), 400
 
-    # Resolution order:
-    #   1. As-is (absolute path)
-    #   2. Relative to the current image directory  (e.g. "../34" or just "34")
-    #   3. Relative to the app.py working directory
+    # Resolve path: absolute → relative to image dir → relative to cwd
     src = Path(src_str)
-    if not src.is_dir() and idir is not None:
-        candidate = Path(idir) / src_str
-        if candidate.is_dir():
-            src = candidate
     if not src.is_dir():
-        candidate = Path.cwd() / src_str
-        if candidate.is_dir():
-            src = candidate
+        c = Path(idir) / src_str
+        if c.is_dir(): src = c
     if not src.is_dir():
-        return jsonify({"error": f"Directory not found: '{src_str}' (tried absolute, relative to image dir, and relative to working dir)"}), 400
+        c = Path.cwd() / src_str
+        if c.is_dir(): src = c
+    if not src.is_dir():
+        return jsonify({"error": f"Directory not found: '{src_str}'"}), 400
     src = src.resolve()
 
+    # Load foreign session
     foreign = sess.load(src)
+    print(f"[import] Loaded session from {src}")
+    print(f"[import] Foreign classes: {[c['name'] for c in foreign['classes']]}")
+    print(f"[import] Foreign shape keys: {list(foreign['shapes'].keys())[:5]}")
+    print(f"[import] Foreign shape counts: { {k: len(v) for k,v in foreign['shapes'].items()} }")
+
     if not foreign["classes"] and not any(foreign["shapes"].values()):
-        return jsonify({"error": "Source session is empty."}), 400
+        return jsonify({"error": f"Source session is empty: {src / '.eupe_session' / 'session.json'}"}), 400
 
-    current   = STATE["session"]
-    img_names = {p.name for p in STATE["image_list"]}
+    current = STATE["session"]
 
-    # Build name→id map for current classes
+    # ── Merge classes by name ─────────────────────────────────────────────────
     cur_name_to_id = {c["name"]: c["id"] for c in current["classes"]}
-
-    # id remapping: foreign class id → current class id
     id_remap: dict[int, int] = {}
     for fc in foreign["classes"]:
         if fc["name"] in cur_name_to_id:
             id_remap[fc["id"]] = cur_name_to_id[fc["name"]]
         else:
-            # Mint a new id
             current["class_id_seq"] += 1
             new_id = current["class_id_seq"]
             id_remap[fc["id"]] = new_id
@@ -610,34 +620,123 @@ def api_import_session():
                 "color": fc.get("color", [128, 128, 128]),
                 "hex":   fc.get("hex",   "#808080"),
             })
+    print(f"[import] id_remap: {id_remap}")
 
-    # Import shapes for images that exist in this directory
-    imported_files, imported_shapes = 0, 0
-    for fname, shapes in foreign["shapes"].items():
-        if fname not in img_names:
-            continue   # skip images not in this dataset
-        remapped = []
-        for s in shapes:
-            remapped.append({**s, "class_id": id_remap.get(s["class_id"], s["class_id"])})
-        # Merge: keep existing shapes, add imported ones (deduplicate by content)
-        existing = current["shapes"].get(fname, [])
-        existing_set = {str(e) for e in existing}
-        added = [r for r in remapped if str(r) not in existing_set]
-        current["shapes"][fname] = existing + added
-        if added:
-            imported_files += 1
-            imported_shapes += len(added)
+    # ── Build image lookups (case-insensitive for Windows compatibility) ───────
+    # Current directory: name.lower() → Path
+    cur_img_lower = {p.name.lower(): p for p in STATE["image_list"]}
+    # Source directory: name.lower() → Path
+    src_img_lower: dict[str, Path] = {}
+    for p in src.iterdir():
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
+            src_img_lower[p.name.lower()] = p
+
+    print(f"[import] Source images found: {len(src_img_lower)}")
+    print(f"[import] Source images (first 5): {list(src_img_lower.keys())[:5]}")
+
+    # ── Remap shapes and figure out which images are in which dataset ─────────
+    shapes_in_current  = 0   # shapes added to current session JSON (same filename)
+    shapes_in_source   = 0   # shapes to be extracted from source images
+    source_img_anns: dict[str, tuple[Path, list]] = {}   # fname_lower → (src_path, anns)
+
+    cid_color_map = {c["id"]: c.get("color", [128, 128, 128]) for c in current["classes"]}
+
+    for fname, raw_shapes in foreign["shapes"].items():
+        if not raw_shapes:
+            continue
+        fname_lower = fname.lower()
+        remapped = [
+            {**s, "class_id": id_remap.get(s["class_id"], s["class_id"])}
+            for s in raw_shapes
+        ]
+        anns = [
+            {"class_id":    r["class_id"],
+             "class_color": cid_color_map.get(r["class_id"], [128, 128, 128]),
+             "type":        r["type"],
+             "coords":      r["coords"]}
+            for r in remapped
+        ]
+
+        cur_path = cur_img_lower.get(fname_lower)
+        if cur_path is not None:
+            # Same filename exists in current dir → add to current session JSON
+            canonical = cur_path.name   # use current dir's actual capitalisation
+            existing     = current["shapes"].get(canonical, [])
+            existing_set = {str(e) for e in existing}
+            added = [r for r in remapped if str(r) not in existing_set]
+            current["shapes"][canonical] = existing + added
+            shapes_in_current += len(added)
+            print(f"[import] Added {len(added)} shapes for {canonical} to session JSON")
+
+        src_path = src_img_lower.get(fname_lower)
+        if src_path is not None:
+            # Image exists in source dir → extract features and feed global model
+            source_img_anns[fname_lower] = (src_path, anns)
+            shapes_in_source += len(anns)
 
     sess.save(idir, current)
-    # Rebuild global model to include newly imported shapes
-    _trigger_background_rebuild()
+    print(f"[import] Session saved. shapes_in_current={shapes_in_current}, "
+          f"shapes_in_source={shapes_in_source}, "
+          f"source_imgs_to_process={len(source_img_anns)}")
 
+    # ── Background feature extraction and global model feeding ────────────────
+    _snap_source_img_anns = dict(source_img_anns)
+    _snap_preproc = body.get("preproc", CFG.get("default_preproc", "none"))
+    _snap_ps      = core.PATCH_SIZE.get(STATE["model_name"], 16)
+
+    def _feed_global():
+        fed, total_samples = 0, 0
+        for fname_lower, (src_path, anns) in _snap_source_img_anns.items():
+            try:
+                cache_key = (str(src_path), _snap_preproc)
+                with STATE["lock"]:
+                    cached = STATE["cache"].get(cache_key)
+                if cached is None:
+                    img_pil = pp.preprocess(
+                        Image.open(src_path).convert("RGB"), _snap_preproc)
+                    feats = core.extract_features(
+                        STATE["model"], img_pil, STATE["device"],
+                        tile_px   = CFG.get("tile_px",   448),
+                        overlap   = CFG.get("overlap",   0.25),
+                        patch_size= _snap_ps,
+                        max_batch = CFG.get("max_batch", core.MAX_BATCH),
+                    )
+                    cached = {"features": feats, "size": img_pil.size}
+                    with STATE["lock"]:
+                        STATE["cache"][cache_key] = cached
+
+                img_pil2 = Image.open(src_path).convert("RGB")
+                X, y_idx, cid2idx = core.collect_annotation_samples(
+                    cached["features"], img_pil2.size, anns)
+                idx_to_cid = {v: k for k, v in cid2idx.items()}
+                y_cid = np.array([idx_to_cid[i] for i in y_idx], dtype=np.int32)
+                STATE["global_model"].add_samples(X, y_cid, fname_lower, cid2idx)
+                fed += 1
+                total_samples += len(X)
+                print(f"[import] Fed {src_path.name}: {len(X)} samples "
+                      f"(global total: {STATE['global_model'].n_samples})")
+            except Exception:
+                import traceback as _tb
+                print(f"[import] Error feeding {src_path.name}:")
+                _tb.print_exc()
+        print(f"[import] Background done: {fed} images, {total_samples} samples")
+
+    if _snap_source_img_anns:
+        threading.Thread(target=_feed_global, daemon=True).start()
+
+    gm = STATE["global_model"]
     return jsonify({
-        "ok":              True,
-        "imported_files":  imported_files,
-        "imported_shapes": imported_shapes,
-        "resolved_path":   str(src),
-        "session":         sess.export_summary(current),
+        "ok":                     True,
+        "imported_files":         shapes_in_current // max(1, 1),  # shapes in JSON
+        "imported_shapes":        shapes_in_current,
+        "foreign_images_queued":  len(_snap_source_img_anns),
+        "resolved_path":          str(src),
+        "session":                sess.export_summary(current),
+        "global_model": {
+            "n_samples":         gm.n_samples,
+            "n_classes":         gm.n_classes,
+            "n_images_labelled": len(gm.n_samples_per_image),
+        },
     })
 
 
@@ -698,7 +797,7 @@ def api_propagate():
     body    = request.json or {}
     idx     = int(body.get("idx", 0)) % len(imgs)
     anns    = body.get("annotations", [])
-    method  = body.get("method", "centroid")
+    method  = "centroid"   # SVM removed — centroid only
     scope   = body.get("scope", "local")
     use_ws  = bool(body.get("watershed", False))
     ws_er   = int(body.get("ws_erosions", 3))
@@ -734,7 +833,6 @@ def api_propagate():
                     idx_to_cid = {v: k for k, v in cid2idx.items()}
                     y_cid = np.array([idx_to_cid[i] for i in y_idx], dtype=np.int32)
                     gm.add_samples(X, y_cid, path.name, cid2idx)
-                    gm.clf = None
                 except Exception as ex:
                     print(f"[propagate] Could not add current-image samples: {ex}")
 
@@ -764,7 +862,6 @@ def api_propagate():
                     idx_to_cid = {v: k for k, v in cid2idx.items()}
                     y_cid = np.array([idx_to_cid[i] for i in y_idx], dtype=np.int32)
                     STATE["global_model"].add_samples(X, y_cid, path.name, cid2idx)
-                    STATE["global_model"].clf = None
                 except Exception:
                     pass
 
@@ -900,6 +997,189 @@ def api_save():
     _s("overlay",    out_dir / (path.stem + "_kmeans_overlay.png"))
     return jsonify({"saved": saved, "dir": str(out_dir)})
 
+
+
+# ── Batch propagation (whole directory) ──────────────────────────────────────
+
+# Shared state for the running batch job
+_BATCH = {
+    "running":   False,
+    "cancel":    False,
+    "total":     0,
+    "done":      0,
+    "errors":    0,
+    "current":   "",
+    "log":       [],     # list of str, capped at 200 lines
+    "lock":      threading.Lock(),
+}
+
+def _batch_log(msg: str) -> None:
+    with _BATCH["lock"]:
+        _BATCH["log"].append(msg)
+        if len(_BATCH["log"]) > 200:
+            _BATCH["log"] = _BATCH["log"][-200:]
+    print(f"[batch] {msg}")
+
+
+def _run_batch(imgs, preproc, use_ws, ws_er, alpha, cid_color):
+    """
+    Worker thread — classify every image with the global model.
+
+    Memory strategy
+    ---------------
+    • Uses _extract_features_nocache() — features are NEVER stored in
+      STATE["cache"], so RAM stays flat regardless of dataset size.
+    • classify_pixels_streaming() inside propagate_with_global_model()
+      processes patch-strip by patch-strip (default 8 patch rows ≈ 128
+      pixel rows), so the full (H, W, D) tensor is never in memory.
+    • Peak RAM per image ≈ 1 patch-strip ≈ 750 MB (GPU) + overlay (50 MB).
+      After each image the Python GC reclaims everything.
+    • Only the last-processed image is kept in STATE["last_prop"] for the
+      reblend / watershed endpoints (the previous entry is evicted).
+    """
+    gm = STATE["global_model"]
+    _BATCH["total"]   = len(imgs)
+    _BATCH["done"]    = 0
+    _BATCH["errors"]  = 0
+    _BATCH["log"]     = []
+    _batch_log(f"Starting batch: {len(imgs)} images, preproc={preproc}, "
+               f"global model: {gm.n_samples} samples / {gm.n_classes} classes")
+
+    for path in imgs:
+        if _BATCH["cancel"]:
+            _batch_log("Cancelled by user.")
+            break
+        _BATCH["current"] = path.name
+        try:
+            # Extract without caching — discard after this iteration
+            feats, img_size = _extract_features_nocache(path, preproc)
+            image   = Image.open(path).convert("RGB")
+            orig_np = np.array(image).astype(np.float32) / 255.0
+
+            lbl_up, colored, _ = core.propagate_with_global_model(
+                gm, feats, image.size, cid_color,
+                method="centroid",
+                use_watershed=use_ws,
+                image=image if use_ws else None,
+                watershed_erosions=ws_er,
+            )
+            overlay = core.make_overlay(orig_np, colored, alpha)
+
+            # Keep only the current image in last_prop (evict the previous one)
+            with STATE["lock"]:
+                STATE["last_prop"].clear()
+                STATE["last_prop"][str(path)] = {
+                    "lbl_up":  lbl_up,
+                    "colored": colored,
+                    "orig_np": orig_np,
+                }
+
+            saved = _auto_save_mask(path, lbl_up, colored, overlay)
+            _BATCH["done"] += 1
+            _batch_log(f"[{_BATCH['done']}/{_BATCH['total']}] {path.name} "
+                       f"→ {len(saved)} files saved")
+
+            # Explicitly release large arrays before next iteration
+            del feats, lbl_up, colored, overlay, orig_np
+
+        except Exception as ex:
+            _BATCH["errors"] += 1
+            import traceback as _tb
+            _batch_log(f"ERROR {path.name}: {ex}")
+            _tb.print_exc()
+
+    _BATCH["running"] = False
+    _BATCH["current"] = ""
+    if _BATCH["cancel"]:
+        _batch_log(f"Stopped. {_BATCH['done']} done, {_BATCH['errors']} errors.")
+    else:
+        _batch_log(f"Done. {_BATCH['done']}/{_BATCH['total']} processed, "
+                   f"{_BATCH['errors']} errors.")
+
+
+@app.route("/api/batch_propagate", methods=["POST"])
+def api_batch_propagate():
+    """
+    Build the global model from all session shapes, then propagate to every
+    image in the directory, overwriting existing masks.
+
+    Body:
+    {
+      "preproc":     str,
+      "watershed":   bool,
+      "ws_erosions": int,
+      "alpha":       float
+    }
+
+    Returns immediately with {"started": true}.
+    Poll /api/batch_status for progress.
+    POST /api/batch_cancel to abort.
+    """
+    if _BATCH["running"]:
+        return jsonify({"error": "A batch job is already running. Cancel it first."}), 409
+    if not STATE["model"]:
+        return jsonify({"error": "No model loaded."}), 400
+    if not STATE["image_list"]:
+        return jsonify({"error": "No image directory set."}), 400
+
+    # Ensure global model is up-to-date
+    STATE["global_model"].reset()
+    n_rebuilt = _rebuild_global_model(CFG.get("default_preproc", "none"))
+    gm = STATE["global_model"]
+    if gm.n_samples == 0:
+        return jsonify({"error": "Global model is empty — annotate at least one image first."}), 400
+
+    body   = request.json or {}
+    preproc = body.get("preproc", CFG.get("default_preproc", "none"))
+    use_ws  = bool(body.get("watershed", False))
+    ws_er   = int(body.get("ws_erosions", 3))
+    alpha   = float(body.get("alpha", 0.5))
+
+    # Build colour map from session classes
+    cid_color = {c["id"]: c.get("color", [128, 128, 128])
+                 for c in STATE["session"]["classes"]}
+
+    imgs = list(STATE["image_list"])
+
+    with _BATCH["lock"]:
+        _BATCH["running"] = True
+        _BATCH["cancel"]  = False
+
+    threading.Thread(
+        target=_run_batch,
+        args=(imgs, preproc, use_ws, ws_er, alpha, cid_color),
+        daemon=True,
+    ).start()
+
+    return jsonify({
+        "started":         True,
+        "total":           len(imgs),
+        "global_samples":  gm.n_samples,
+        "global_classes":  gm.n_classes,
+        "rebuilt_from":    n_rebuilt,
+    })
+
+
+@app.route("/api/batch_status")
+def api_batch_status():
+    """Poll this to get live progress."""
+    with _BATCH["lock"]:
+        return jsonify({
+            "running": _BATCH["running"],
+            "cancel":  _BATCH["cancel"],
+            "total":   _BATCH["total"],
+            "done":    _BATCH["done"],
+            "errors":  _BATCH["errors"],
+            "current": _BATCH["current"],
+            "log":     _BATCH["log"][-30:],   # last 30 lines for the UI
+        })
+
+
+@app.route("/api/batch_cancel", methods=["POST"])
+def api_batch_cancel():
+    with _BATCH["lock"]:
+        _BATCH["cancel"] = True
+    return jsonify({"ok": True})
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI

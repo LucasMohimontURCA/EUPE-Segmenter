@@ -20,6 +20,7 @@ Key changes vs v5
 from __future__ import annotations
 
 import math
+import threading
 from typing import Optional
 
 import cv2
@@ -267,10 +268,124 @@ def upsample_to(arr_hwc: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
 
 
 def upsample_labels(lbl: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbour label upsample — kept for watershed and k-means recolour."""
     W, H = wh
     t    = torch.from_numpy(lbl.astype(np.float32)).unsqueeze(0).unsqueeze(0)
     up   = F.interpolate(t, size=(H, W), mode="nearest").squeeze().numpy().astype(np.int32)
     return up
+
+
+def upsample_features(features: np.ndarray, wh: tuple[int, int]) -> np.ndarray:
+    """
+    Bilinearly upsample (gh, gw, D) → (H, W, D).
+    Only used when the caller genuinely needs the full array (e.g. visualisation).
+    For classification, use classify_pixels_streaming() instead.
+    """
+    W, H = wh
+    t  = torch.from_numpy(features).permute(2, 0, 1).unsqueeze(0)  # (1, D, gh, gw)
+    up = F.interpolate(t, size=(H, W), mode="bilinear", align_corners=False)
+    return up.squeeze(0).permute(1, 2, 0).numpy()   # (H, W, D)
+
+
+def classify_pixels(
+    features_hw: np.ndarray,         # (H, W, D) — already upsampled
+    centroids:   np.ndarray,         # (n_classes, D) — L2-normalised
+    class_ids:   list[int],
+    chunk_rows:  int = 128,
+) -> np.ndarray:
+    """
+    Classify a pre-upsampled (H, W, D) feature array.
+    Kept for compatibility; prefer classify_pixels_streaming for large images.
+    """
+    H, W, D = features_hw.shape
+    result   = np.empty((H, W), dtype=np.int32)
+    cid_arr  = np.array(class_ids, dtype=np.int32)
+
+    for r0 in range(0, H, chunk_rows):
+        r1    = min(r0 + chunk_rows, H)
+        chunk = features_hw[r0:r1].reshape(-1, D).astype(np.float32)
+        norms = np.linalg.norm(chunk, axis=1, keepdims=True)
+        chunk = chunk / np.where(norms > 0, norms, 1.0)
+        pred  = (chunk @ centroids.T).argmax(axis=1)
+        result[r0:r1] = cid_arr[pred].reshape(r1 - r0, W)
+
+    return result
+
+
+def classify_pixels_streaming(
+    features:   np.ndarray,       # (gh, gw, D) — patch-grid features
+    centroids:  np.ndarray,       # (n_classes, D) — L2-normalised
+    class_ids:  list[int],
+    img_wh:     tuple[int, int],  # (W, H) target resolution
+    patch_chunk: int = 8,         # upsample this many patch rows at a time
+) -> np.ndarray:
+    """
+    Streaming feature upsample + classify — never materialises the full
+    (H, W, D) tensor.
+
+    Memory budget per chunk (patch_chunk=8, W=1920, D=768):
+        pixel_rows ≈ 8 * (H/gh) ≈ 8 * (1080/68) ≈ 128 rows
+        chunk RAM  = 128 * 1920 * 768 * 4 bytes ≈ 750 MB   (peak, then freed)
+
+    Reduce patch_chunk if you hit OOM; increase for speed (fewer iterations).
+
+    Algorithm
+    ---------
+    For each horizontal strip of `patch_chunk` patch rows:
+      1. Extract the strip + 1 overlap row on each side (for correct boundary
+         interpolation at strip edges).
+      2. Upsample the padded strip to pixel resolution using F.interpolate.
+      3. Crop away the overlap rows to get the exact pixel rows for this strip.
+      4. Classify those rows by cosine similarity to centroids.
+      5. Write results into the output array and discard the strip tensor.
+    """
+    W, H     = img_wh
+    gh, gw, D = features.shape
+    cid_arr  = np.array(class_ids, dtype=np.int32)
+    result   = np.empty((H, W), dtype=np.int32)
+
+    # Pixel rows per patch row (may not divide evenly — use float mapping)
+    px_per_patch = H / gh
+
+    for gp0 in range(0, gh, patch_chunk):
+        gp1 = min(gp0 + patch_chunk, gh)
+
+        # Overlap: include 1 extra patch row above and below for edge accuracy
+        gp0_pad = max(0, gp0 - 1)
+        gp1_pad = min(gh, gp1 + 1)
+
+        strip = features[gp0_pad:gp1_pad]          # (strip_gh, gw, D)
+        strip_gh = strip.shape[0]
+
+        # Compute the pixel height this padded strip maps to
+        px0_pad = int(round(gp0_pad * px_per_patch))
+        px1_pad = min(H, int(round(gp1_pad * px_per_patch)))
+        px_h_pad = px1_pad - px0_pad
+
+        # Upsample strip to (px_h_pad, W, D)
+        t  = torch.from_numpy(strip).permute(2, 0, 1).unsqueeze(0)  # (1,D,sg,gw)
+        up = F.interpolate(t, size=(px_h_pad, W),
+                           mode="bilinear", align_corners=False)     # (1,D,pH,W)
+        up = up.squeeze(0).permute(1, 2, 0).numpy()                 # (pH,W,D)
+
+        # Crop to exact target pixel rows (remove overlap padding)
+        px0 = int(round(gp0 * px_per_patch))
+        px1 = min(H, int(round(gp1 * px_per_patch)))
+        crop_start = px0 - px0_pad
+        crop_end   = crop_start + (px1 - px0)
+        up_crop    = up[crop_start:crop_end]          # (rows, W, D)
+
+        # Classify
+        rows, _, _ = up_crop.shape
+        flat  = up_crop.reshape(-1, D).astype(np.float32)
+        norms = np.linalg.norm(flat, axis=1, keepdims=True)
+        flat  = flat / np.where(norms > 0, norms, 1.0)
+        pred  = (flat @ centroids.T).argmax(axis=1)
+        result[px0:px1] = cid_arr[pred].reshape(rows, W)
+
+        del t, up, up_crop, flat   # explicit free
+
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -435,35 +550,32 @@ def propagate_labels(
     image:  Optional[Image.Image] = None,
     watershed_erosions: int = 3,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """
+    Classify every pixel by:
+      1. Computing per-class centroids from annotated patch regions.
+      2. Bilinearly upsampling the feature map to full image resolution.
+      3. Classifying every pixel by cosine similarity to the centroids.
+
+    Step 2-3 eliminates the 16-px block artefact: boundaries are resolved at
+    full pixel resolution rather than being snapped to the patch grid.
+    """
     gh, gw, D = features.shape
-    flat      = features.reshape(-1, D).astype(np.float32)
+    W, H      = img_wh
 
     X, y, cid2idx = collect_annotation_samples(features, img_wh, annotations)
     class_ids = sorted(cid2idx, key=cid2idx.get)
     n_classes = len(class_ids)
 
-    if method == "svm" and n_classes >= 2:
-        try:
-            Xn       = sk_normalize(X)
-            fn       = sk_normalize(flat)
-            clf      = LinearSVC(max_iter=3000, C=1.0)
-            clf.fit(Xn, y)
-            pred_idx = clf.predict(fn)
-        except Exception:
-            method = "centroid"
+    # ── Build L2-normalised centroids ─────────────────────────────────────────
+    centroids = np.array([
+        X[y == i].mean(0) if (y == i).any() else np.zeros(D)
+        for i in range(n_classes)
+    ], dtype=np.float32)
+    cn = centroids / (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8)
 
-    if method == "centroid" or n_classes < 2:
-        centroids = np.array([
-            X[y == i].mean(0) if (y == i).any() else np.zeros(D)
-            for i in range(n_classes)
-        ], dtype=np.float32)
-        cn       = centroids / (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8)
-        fn2      = flat / (np.linalg.norm(flat, axis=1, keepdims=True) + 1e-8)
-        pred_idx = (fn2 @ cn.T).argmax(axis=1)
-
-    pred_cid = np.array([class_ids[i] for i in pred_idx], dtype=np.int32).reshape(gh, gw)
-    W, H     = img_wh
-    lbl_up   = upsample_labels(pred_cid, (W, H))
+    # ── Streaming classify: upsample + classify patch-strip by patch-strip ──────
+    # Never materialises the full (H, W, D) tensor — constant RAM usage.
+    lbl_up = classify_pixels_streaming(features, cn, class_ids, (W, H))
 
     if use_watershed and image is not None:
         lbl_up = watershed_refine(image, lbl_up, n_erosions=watershed_erosions)
@@ -485,20 +597,32 @@ def propagate_labels(
 # ─────────────────────────────────────────────────────────────────────────────
 
 class GlobalModel:
-    """Accumulates labelled feature patches from all annotated images."""
+    """
+    Accumulates labelled feature patches from all annotated images.
+
+    Design
+    ------
+    Centroids are computed eagerly inside _rebuild() so they are always
+    available immediately after add_samples() — no separate fit() call
+    required, no lazy-cache race condition between threads.
+    fit() still exists as a public entry point but is now a no-op if
+    centroids are already up-to-date.
+    """
 
     def __init__(self):
-        self.X:    Optional[np.ndarray] = None
-        self.y:    Optional[np.ndarray] = None
-        self.class_ids: list[int]       = []
-        self.cid2idx:   dict[int, int]  = {}
-        self.clf        = None
-        self.clf_method = "centroid"
+        self.X:          Optional[np.ndarray] = None
+        self.y:          Optional[np.ndarray] = None
+        self.class_ids:  list[int]            = []
+        self.cid2idx:    dict[int, int]       = {}
+        # centroids (n_classes, D) — always kept in sync with X/y
+        self._centroids: Optional[np.ndarray] = None
         self.n_samples_per_image: dict[str, int] = {}
-        self._pending:  dict[str, tuple] = {}
+        self._pending:   dict[str, tuple]     = {}
+        self._lock:      threading.Lock       = threading.Lock()
 
     def reset(self):
-        self.__init__()
+        with self._lock:
+            self.__init__()
 
     @property
     def n_classes(self) -> int:
@@ -510,61 +634,70 @@ class GlobalModel:
 
     def add_samples(self, X: np.ndarray, y_cid: np.ndarray,
                     filename: str, cid2idx: dict[int, int]) -> None:
-        self._pending[filename] = (X, y_cid)
-        self._rebuild()
+        with self._lock:
+            self._pending[filename] = (X, y_cid)
+            self._rebuild_locked()
 
-    def _rebuild(self):
+    def _rebuild_locked(self) -> None:
+        """Must be called with self._lock held."""
         pending = self._pending
         if not pending:
             return
         all_cids: set[int] = set()
-        for X, y_cid in pending.values():
+        for _, y_cid in pending.values():
             all_cids.update(y_cid.tolist())
         self.class_ids = sorted(all_cids)
         self.cid2idx   = {cid: i for i, cid in enumerate(self.class_ids)}
+
         X_parts, y_parts = [], []
         for fname, (X, y_cid) in pending.items():
             y_idx = np.array([self.cid2idx[c] for c in y_cid], dtype=np.int32)
             X_parts.append(X)
             y_parts.append(y_idx)
             self.n_samples_per_image[fname] = len(X)
-        self.X   = np.vstack(X_parts)
-        self.y   = np.concatenate(y_parts)
-        self.clf = None
+
+        self.X = np.vstack(X_parts)
+        self.y = np.concatenate(y_parts)
+
+        # Compute centroids immediately — no deferred fit()
+        D = self.X.shape[1]
+        self._centroids = np.array([
+            self.X[self.y == i].mean(0) if (self.y == i).any() else np.zeros(D)
+            for i in range(len(self.class_ids))
+        ], dtype=np.float32)
 
     def fit(self, method: str = "centroid") -> None:
-        if self.X is None or self.n_classes < 1:
-            raise ValueError("No labelled samples.")
-        if self.clf is not None:
-            return
-        if method == "svm" and self.n_classes >= 2:
-            try:
-                Xn       = sk_normalize(self.X)
-                self.clf = LinearSVC(max_iter=3000, C=1.0)
-                self.clf.fit(Xn, self.y)
-                self.clf_method = "svm"
-                return
-            except Exception:
-                pass
-        centroids = np.array([
-            self.X[self.y == i].mean(0) if (self.y == i).any() else np.zeros(self.X.shape[1])
-            for i in range(self.n_classes)
-        ], dtype=np.float32)
-        self.clf        = centroids
-        self.clf_method = "centroid"
+        """
+        Ensure centroids are computed.  Since _rebuild_locked() already
+        does this eagerly, this is effectively a guard / compatibility shim.
+        Raises ValueError if there are no samples at all.
+        """
+        with self._lock:
+            if self.X is None or len(self.class_ids) == 0:
+                raise ValueError(
+                    "Global model has no samples — annotate at least one image "
+                    "and run Rebuild Global Model (or use Local scope first)."
+                )
+            if self._centroids is None:
+                # Shouldn't happen, but recompute defensively
+                self._rebuild_locked()
+
+    def get_centroids_normalised(self) -> np.ndarray:
+        """Return L2-normalised centroids (n_classes, D)."""
+        with self._lock:
+            if self._centroids is None:
+                raise RuntimeError(
+                    "Centroids not available — call fit() or add_samples() first."
+                )
+            c = self._centroids.copy()   # copy so caller can't mutate shared state
+        return c / (np.linalg.norm(c, axis=1, keepdims=True) + 1e-8)
 
     def predict(self, flat_features: np.ndarray) -> np.ndarray:
-        if self.clf is None:
-            raise RuntimeError("Call fit() first.")
-        if self.clf_method == "svm":
-            fn       = sk_normalize(flat_features.astype(np.float32))
-            pred_idx = self.clf.predict(fn)
-        else:
-            centroids = self.clf
-            cn  = centroids / (np.linalg.norm(centroids, axis=1, keepdims=True) + 1e-8)
-            fn2 = flat_features.astype(np.float32)
-            fn2 = fn2 / (np.linalg.norm(fn2, axis=1, keepdims=True) + 1e-8)
-            pred_idx = (fn2 @ cn.T).argmax(axis=1)
+        """Classify a flat (N, D) array using cosine similarity to centroids."""
+        cn  = self.get_centroids_normalised()
+        fn  = flat_features.astype(np.float32)
+        fn  = fn / (np.linalg.norm(fn, axis=1, keepdims=True) + 1e-8)
+        pred_idx = (fn @ cn.T).argmax(axis=1)
         return np.array([self.class_ids[i] for i in pred_idx], dtype=np.int32)
 
 
@@ -582,12 +715,16 @@ def propagate_with_global_model(
     image:  Optional[Image.Image] = None,
     watershed_erosions: int = 3,
 ) -> tuple[np.ndarray, np.ndarray, list[dict]]:
+    """
+    Classify every pixel using the global model centroids and pixel-level features.
+    See propagate_labels for the rationale on feature-first upsampling.
+    """
     global_model.fit(method)
-    gh, gw, D = features.shape
-    flat      = features.reshape(-1, D).astype(np.float32)
-    pred_cid  = global_model.predict(flat).reshape(gh, gw)
-    W, H      = img_wh
-    lbl_up    = upsample_labels(pred_cid, (W, H))
+    W, H = img_wh
+
+    # Streaming classify — never materialises the full (H, W, D) tensor
+    cn     = global_model.get_centroids_normalised()
+    lbl_up = classify_pixels_streaming(features, cn, global_model.class_ids, (W, H))
 
     if use_watershed and image is not None:
         lbl_up = watershed_refine(image, lbl_up, n_erosions=watershed_erosions)
